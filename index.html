@@ -1,170 +1,159 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <title>Horiba U‑5000 Auto Serial Logger</title>
-  <style>
-    body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 800px; }
-    textarea { width: 100%; height: 300px; font-family: monospace; white-space: pre; }
-    button, input { margin: 0.25rem 0; display: block; }
-  </style>
+<meta charset="utf-8"/>
+<title>Horiba U-5000 Auto Baud Finder</title>
+<style>
+body { font-family: system-ui,sans-serif; max-width: 800px; padding: 1rem; }
+button,input { margin: 0.25rem 0; display: block; }
+textarea { width: 100%; height: 300px; font-family: monospace; white-space: pre; }
+</style>
 </head>
 <body>
-  <h1>Horiba U‑5000 Auto Serial Logger</h1>
-  <p>Automatically scans baud, sends request, logs response.</p>
+<h1>Horiba U-5000 Auto Baud Finder</h1>
+<p>Automatically scans baud rates and logs any data received.</p>
 
-  <button id="connect">Connect</button>
-  <button id="start" disabled>Start Auto-Logging</button>
-  <button id="stop" disabled>Stop</button>
-  <button id="download" disabled>Download Log (CSV)</button>
+<button id="connectBtn">Connect to Device</button>
+<button id="startBtn" disabled>Start Auto Scan</button>
+<button id="stopBtn" disabled>Stop</button>
+<button id="downloadBtn" disabled>Download Log (CSV)</button>
 
-  <textarea id="log" readonly placeholder="Log output..."></textarea>
+<textarea id="log" readonly placeholder="Log will appear here..."></textarea>
 
 <script>
-const connectBtn = document.getElementById('connect');
-const startBtn = document.getElementById('start');
-const stopBtn = document.getElementById('stop');
-const downloadBtn = document.getElementById('download');
+const connectBtn = document.getElementById('connectBtn');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const downloadBtn = document.getElementById('downloadBtn');
 const logArea = document.getElementById('log');
 
 let port = null;
-let keepRunning = false;
 let reader = null;
+let keepRunning = false;
 let dataLog = [];
 
-function appendLine(line) {
-  logArea.value += line + '\n';
-  logArea.scrollTop = logArea.scrollHeight;
-  dataLog.push('"' + line.replace(/"/g, '""') + '"');
+function appendLine(line){
+    logArea.value += line + '\n';
+    logArea.scrollTop = logArea.scrollHeight;
+    if(line.trim()) dataLog.push('"' + line.replace(/"/g,'""') + '"');
 }
 
-/** Calculate 2‑char XOR FCS for command */
-function calcFCS(str) {
-  let xor = 0;
-  for (let i = 0; i < str.length; i++) {
-    xor ^= str.charCodeAt(i);
-  }
-  // convert to 2-digit hex uppercase
-  let hex = xor.toString(16).toUpperCase();
-  if (hex.length < 2) hex = '0' + hex;
-  return hex;
+// Build request command with XOR FCS
+function calcFCS(str){
+    let xor = 0;
+    for(let i=0;i<str.length;i++) xor ^= str.charCodeAt(i);
+    let hex = xor.toString(16).toUpperCase();
+    return hex.length<2 ? '0'+hex : hex;
+}
+function buildRequest(){
+    const header = "#RD@";
+    const fcs = calcFCS(header);
+    return header + fcs + '\r\n';
 }
 
-/** Builds request command: "#RD@XX\r\n" */
-function buildRequest() {
-  const header = "#RD@";
-  const fcs = calcFCS(header);
-  return header + fcs + '\r\n';
+// Open port
+async function openPort(baud){
+    try{
+        await port.open({baudRate:baud,dataBits:8,stopBits:1,parity:'none',flowControl:'none'});
+        appendLine(`Port opened at ${baud}`);
+        return true;
+    }catch(e){ appendLine(`Failed to open ${baud}: ${e}`); return false; }
 }
 
-async function openPort(baud) {
-  try {
-    await port.open({ baudRate: baud, dataBits: 8, parity: 'none', stopBits: 1, flowControl: 'none' });
-    appendLine(`Opened at ${baud}`);
-    return true;
-  } catch (err) {
-    appendLine(`Open failed at ${baud}: ${err}`);
-    return false;
-  }
+// Close port
+async function closePort(){
+    try{
+        if(reader){ await reader.cancel(); reader=null; }
+        if(port && port.readable){ await port.close(); appendLine('Port closed'); }
+    }catch(e){ appendLine('Close error: '+e); }
 }
 
-async function closePort() {
-  try {
-    if (reader) { await reader.cancel(); reader = null; }
-    if (port && port.readable) { await port.close(); appendLine('Port closed'); }
-  } catch (e) {
-    appendLine('Close error: ' + e);
-  }
-}
-
-async function readOnce(timeout = 500) {
-  const textDecoder = new TextDecoderStream();
-  port.readable.pipeTo(textDecoder.writable);
-  reader = textDecoder.readable.getReader();
-  const start = Date.now();
-  let buffer = '';
-  while (Date.now() - start < timeout) {
-    try {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) buffer += value;
-    } catch (e) {
-      appendLine('Read error: ' + e);
-      break;
+// Read data for given timeout (ms)
+async function readOnce(timeout=2000){
+    const textDecoder = new TextDecoderStream();
+    port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+    const start = Date.now();
+    let buffer = '';
+    while(Date.now()-start<timeout){
+        try{
+            const {value,done} = await reader.read();
+            if(done) break;
+            if(value) buffer += value;
+        }catch(e){
+            appendLine('Read error: '+e);
+            break;
+        }
     }
-  }
-  if (reader) {
-    try { await reader.cancel(); } catch {} 
-    reader = null;
-  }
-  return buffer;
+    if(reader){ try{ await reader.cancel(); }catch{} reader=null; }
+    return buffer;
 }
 
-async function autoCycle() {
-  if (!port) throw new Error('No port');
-  keepRunning = true;
-  const bauds = [300, 600, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
-  appendLine('--- Begin auto-scan & request ---');
+// Main auto-scan
+async function autoScan(){
+    if(!port) return appendLine('No port selected');
+    keepRunning = true;
+    const bauds = [19200,38400,57600,115200]; // likely Horiba baud rates
+    appendLine('--- Auto Scan Started ---');
 
-  for (let baud of bauds) {
-    if (!keepRunning) break;
+    for(let baud of bauds){
+        if(!keepRunning) break;
+        await closePort();
+        const ok = await openPort(baud);
+        if(!ok) continue;
+
+        // Try reading first
+        let resp = await readOnce(2000);
+        if(!resp){
+            // if no data, try sending request command
+            const writer = port.writable.getWriter();
+            const req = buildRequest();
+            appendLine(`→ Sending request at ${baud}: ${req.trim()}`);
+            await writer.write(new TextEncoder().encode(req));
+            writer.releaseLock();
+            resp = await readOnce(2000);
+        }
+
+        if(resp){
+            appendLine(`<– Response at ${baud}: ${resp.replace(/\r/g,'\\r').replace(/\n/g,'\\n')}`);
+        }else{
+            appendLine(`<– No response at ${baud}`);
+        }
+    }
+
     await closePort();
-    const opened = await openPort(baud);
-    if (!opened) continue;
-
-    // send request
-    const writer = port.writable.getWriter();
-    const req = buildRequest();
-    appendLine(`→ Sending request at ${baud}: ${req.trim()}`);
-    await writer.write(new TextEncoder().encode(req));
-    writer.releaseLock();
-
-    // read response
-    const resp = await readOnce(700);
-    if (resp) {
-      appendLine(`<– Response at ${baud}: ${resp.replace(/\r/g, '\\r').replace(/\n/g, '\\n')}`);
-    } else {
-      appendLine(`<– No response at ${baud}`);
-    }
-  }
-
-  await closePort();
-  appendLine('--- Auto-scan finished ---');
-  downloadBtn.disabled = dataLog.length === 0;
+    appendLine('--- Auto Scan Finished ---');
+    downloadBtn.disabled = dataLog.length===0;
 }
 
-connectBtn.addEventListener('click', async () => {
-  try {
-    port = await navigator.serial.requestPort();
-    appendLine('Port selected');
-    startBtn.disabled = false;
-  } catch (e) {
-    appendLine('Port request cancelled or failed: ' + e);
-  }
+connectBtn.addEventListener('click', async ()=>{
+    try{
+        port = await navigator.serial.requestPort();
+        appendLine('Port selected by user');
+        startBtn.disabled = false;
+    }catch(e){ appendLine('Port selection failed: '+e); }
 });
 
-startBtn.addEventListener('click', async () => {
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  dataLog = [];
-  await autoCycle();
-  stopBtn.disabled = true;
-  startBtn.disabled = false;
+startBtn.addEventListener('click', async ()=>{
+    startBtn.disabled=true;
+    stopBtn.disabled=false;
+    dataLog=[];
+    await autoScan();
+    stopBtn.disabled=true;
+    startBtn.disabled=false;
 });
 
-stopBtn.addEventListener('click', () => {
-  keepRunning = false;
-});
+stopBtn.addEventListener('click', ()=>{ keepRunning=false; });
 
-downloadBtn.addEventListener('click', () => {
-  const csv = dataLog.join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'horiba_u5000_log.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+downloadBtn.addEventListener('click', ()=>{
+    const csv = dataLog.join('\n');
+    const blob = new Blob([csv],{type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href=url;
+    a.download='horiba_u5000_log.csv';
+    a.click();
+    URL.revokeObjectURL(url);
 });
 </script>
 </body>
