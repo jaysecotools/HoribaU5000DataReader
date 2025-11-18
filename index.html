@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Serial Reader — Horiba test</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial; padding:1rem; max-width:760px;}
+  textarea{width:100%; height:300px; font-family:monospace; white-space:pre;}
+  label,button{margin:0.25rem 0; display:block;}
+</style>
+</head>
+<body>
+  <h1>Serial Reader — quick test</h1>
+  <p>Click <strong>Connect</strong>, choose the device, then click <strong>Start</strong>.</p>
+
+  <label>Baud rate:
+    <input id="baud" type="number" value="9600" />
+  </label>
+
+  <button id="connectBtn">Connect</button>
+  <button id="startBtn" disabled>Start reading</button>
+  <button id="stopBtn" disabled>Stop</button>
+  <p>
+    <textarea id="log" readonly placeholder="Data will appear here..."></textarea>
+  </p>
+
+<script>
+const connectBtn = document.getElementById('connectBtn');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const log = document.getElementById('log');
+let port = null;
+let reader = null;
+let keepReading = false;
+
+function appendLine(s){ log.value += s + '\n'; log.scrollTop = log.scrollHeight; }
+
+connectBtn.addEventListener('click', async () => {
+  try {
+    // Request a port — user will select from available serial devices
+    port = await navigator.serial.requestPort();
+    appendLine('Port selected.');
+    startBtn.disabled = false;
+  } catch (err) {
+    appendLine('Selection cancelled or error: ' + err);
+  }
+});
+
+startBtn.addEventListener('click', async () => {
+  if (!port) return appendLine('No port selected.');
+  const baud = Number(document.getElementById('baud').value) || 9600;
+  try {
+    await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: 'none' });
+    appendLine('Port opened at ' + baud + ' baud.');
+    keepReading = true;
+    stopBtn.disabled = false;
+    startBtn.disabled = true;
+
+    // Text decoder reader pipeline
+    const textDecoder = new TextDecoderStream();
+    const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+    const readerStream = textDecoder.readable.getReader();
+    reader = readerStream;
+
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        // Many devices send lines; show raw text
+        appendLine(value.replace(/\r/g,''));
+      }
+    }
+
+  } catch (err) {
+    appendLine('Open/read error: ' + err);
+  }
+});
+
+stopBtn.addEventListener('click', async () => {
+  keepReading = false;
+  stopBtn.disabled = true;
+  startBtn.disabled = false;
+  if (reader) {
+    try { await reader.cancel(); reader = null; } catch(e){}
+  }
+  if (port) {
+    try { await port.close(); appendLine('Port closed.'); } catch(e){ appendLine('Close error: '+e); }
+  }
+});
+</script>
+</body>
+</html>
